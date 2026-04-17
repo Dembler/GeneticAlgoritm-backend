@@ -1,65 +1,41 @@
-﻿# Route Optimization Lab
+# Route Optimization Lab Backend
 
-Multi-criteria route optimization platform with FastAPI backend and separate Vue 3 frontend.
+FastAPI backend for a multi-criteria route optimization platform. The Vue 3 frontend lives in a separate repository and is not stored in this backend repo.
+
+## Repository boundaries
+- This repository contains only backend code, backend tests, and backend documentation.
+- Frontend source code must stay in a separate repository.
+- `app/frontend_dist/` is only a generated production bundle copied from the frontend build and served by FastAPI at `/`.
+- `app/frontend_dist/` is ignored by git and must not be edited as source code here.
 
 ## Project structure
-- `app/` - backend on FastAPI, optimization services, API, persistence, and production serving of built frontend assets.
-- `frontend/` - separate frontend project on Vue 3 + TypeScript + Vite.
-- `app/frontend_dist/` - production build output from Vite, served by FastAPI at `/`.
+- `app/` - FastAPI app, API routes, services, repositories, domain models, and SPA serving entrypoint.
+- `docs/` - backend-side notes and model assumptions.
+- `tests/` - backend tests.
+- `data/` - local runtime data such as SQLite database files.
 
-## Features
-- Route optimization with weighted scoring + Pareto front.
-- Metrics: distance, duration, fuel, CO2, congestion, weather risk, reliability, safety, tolls.
-- Automatic weather and elevation ingestion from Open-Meteo.
-- Automatic slope-aware fuel correction and temperature correction.
-- Optional toll-cost matrix from TollGuru API with fallback.
-- Run history in SQLite and CSV export.
-
-## Run
-1. Install backend dependencies:
+## Run backend
+1. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
-2. Install frontend dependencies:
-```bash
-cd frontend
-npm install
-cd ..
-```
-3. Start backend:
+2. Start backend:
 ```bash
 uvicorn app.main:app --reload
 ```
-4. For frontend development, run Vite in a second terminal:
-```bash
-cd frontend
-npm run dev
-```
-Vite proxies `/api` to `http://127.0.0.1:8000`.
+3. Open:
+- API docs: `http://127.0.0.1:8000/docs`
+- UI through built frontend bundle: `http://127.0.0.1:8000`
 
-5. Open:
-- Frontend dev UI: `http://127.0.0.1:5173`
-- UI: `http://127.0.0.1:8000`
-- OpenAPI: `http://127.0.0.1:8000/docs`
+## Frontend integration
+- During frontend development, run the separate frontend repository in its own terminal.
+- The frontend dev server should proxy `/api` to `http://127.0.0.1:8000`.
+- For production-style local integration, build the frontend so that output is written into `app/frontend_dist/`.
 
-## Production build
-Build the Vue frontend into `app/frontend_dist`:
-
-```bash
-cd frontend
-npm run build
-```
-
-Then start FastAPI:
-
-```bash
-uvicorn app.main:app
-```
-
-FastAPI serves the built SPA from `app/frontend_dist`. If the frontend is not built yet, the root path returns a `503` with an explanatory message.
+If `app/frontend_dist/` is missing, the backend returns `503` on `/` with an explanatory message.
 
 ## API
-- `POST /api/routes` - build and optimize route.
+- `POST /api/routes` - build and optimize a route.
 - `GET /api/runs?limit=20` - recent runs.
 - `GET /api/runs/{run_id}` - run details.
 - `GET /api/runs/{run_id}/report.csv` - CSV report.
@@ -79,12 +55,12 @@ FastAPI serves the built SPA from `app/frontend_dist`. If the frontend is not bu
 - `APP_FUEL_PRICE_FALLBACK_PETROL=63.0`
 - `APP_FUEL_PRICE_FALLBACK_DIESEL=68.0`
 
-### Weather and elevation (Open-Meteo)
+### Weather and elevation
 - `APP_WEATHER_ENABLED=true|false`
 - `APP_ELEVATION_ENABLED=true|false`
 - `APP_OPENMETEO_BASE_URL=https://api.open-meteo.com`
 
-### Toll roads (TollGuru)
+### Toll roads
 - `APP_TOLL_ENABLED=true|false`
 - `APP_TOLL_BASE_URL=https://apis.tollguru.com/toll`
 - `APP_TOLL_API_KEY=...`
@@ -97,54 +73,11 @@ FastAPI serves the built SPA from `app/frontend_dist`. If the frontend is not bu
 - `APP_ROUTE_RUNS_DB_PATH=data/route_runs.db`
 
 ## Data source behavior
-- Traffic API integrations are disabled now; source is `traffic-disabled`.
+- Traffic integrations are currently disabled; source is `traffic-disabled`.
 - Weather source: Open-Meteo Forecast API.
 - Elevation source: Open-Meteo Elevation API.
-- Slope shares (uphill/downhill) are calculated automatically from elevation data.
-- Toll source: TollGuru when enabled and key is valid; otherwise fallback source is `toll-disabled`.
-
-PowerShell example:
-```powershell
-$env:APP_WEATHER_ENABLED="true"
-$env:APP_ELEVATION_ENABLED="true"
-$env:APP_OPENMETEO_BASE_URL="https://api.open-meteo.com"
-$env:APP_TOLL_ENABLED="true"
-$env:APP_TOLL_API_KEY="<YOUR_TOLLGURU_API_KEY>"
-$env:APP_TOLL_BASE_URL="https://apis.tollguru.com/toll"
-```
-
-After changing env vars, restart `uvicorn`.
-
-Check response sources in:
-- `data_sources.weather`
-- `data_sources.elevation`
-- `data_sources.traffic`
-- `data_sources.tolls`
-- `data_sources.fuel_prices`
-
-## Temperature impact on fuel
-Fuel consumption includes temperature multiplier in `FuelCostService.temperature_multiplier(...)`.
-
-Reference sources:
-- https://www.energy.gov/energysaver/fuel-economy-cold-weather
-- https://www.fueleconomy.gov/feg/hotweather.shtml
-- https://www.fueleconomy.gov/feg/coldweather.shtml
-
-## Optimizer behavior notes
-- Real point-order optimization starts only when there are enough points to permute:
-  - `fix_ends=true` requires at least 4 points.
-  - `fix_ends=false` requires at least 3 points.
-- `use_dynamic_weights=false` disables context triggers (weather/traffic/peak/fuel price), but still keeps the selected `priority_profile`.
-- Diagnostics now expose:
-  - `optimization_active`
-  - `optimization_reason` (`not_enough_points`, `fixed_route`, `optimize_disabled`)
-  - `score_mode` (`absolute_single_candidate`, `population_normalized`)
-- UI now shows a visual comparison block:
-  - route and metrics `Before GA` vs `After GA`
-  - deltas and improvement percentages
-  - score decomposition by criterion (`weight`, `raw`, `norm`, `contribution`)
-  - compact human-readable summary of what improved
-  - duplicate Pareto rows are collapsed for readability
+- Slope shares are calculated automatically from elevation data.
+- Toll source: TollGuru when enabled and configured; otherwise `toll-disabled`.
 
 ## Model assumptions
 The implementation uses a hybrid engineering approach:
