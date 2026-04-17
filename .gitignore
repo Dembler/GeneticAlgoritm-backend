@@ -1,0 +1,34 @@
+# Python cache and test artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local tools and IDEs
+.idea/
+.agents/
+.claude/
+.kiro/
+.DS_Store
+Thumbs.db
+
+# Environment and local config
+.env
+.env.*
+
+# Runtime data and generated frontend bundle
+data/*.db
+app/frontend_dist/
+
+# Reports, dissertation materials and local research files in project root
+/*.pdf
+/*.txt
+!/requirements.txt
