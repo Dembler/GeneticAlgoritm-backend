@@ -10,6 +10,7 @@ from app.repositories.cache_repository import InMemoryRouteCacheRepository
 from app.repositories.elevation_repository import (
     CompositeElevationRepository,
     FallbackElevationRepository,
+    OpenTopoDataElevationRepository,
     OpenMeteoElevationRepository,
 )
 from app.repositories.fuel_price_repository import RosstatFuelPriceRepository
@@ -31,14 +32,17 @@ from app.repositories.toll_repository import (
 from app.repositories.weather_repository import (
     CompositeWeatherRepository,
     FallbackWeatherRepository,
+    MetNoWeatherRepository,
     OpenMeteoWeatherRepository,
 )
 from app.services.context_service import ContextService
 from app.services.criteria_service import CriteriaService
 from app.services.dynamic_weights_service import DynamicWeightsService
 from app.services.fuel_cost import FuelCostService, FuelPriceService
+from app.services.route_analysis_service import RouteAnalysisService
 from app.services.route_optimizer import RouteOptimizer
 from app.services.route_service import RouteService
+from app.services.terrain_profile_service import TerrainProfileService
 
 
 @lru_cache
@@ -76,12 +80,19 @@ def get_weather_repository() -> CompositeWeatherRepository:
     settings = get_settings()
     primary = None
     if settings.weather_enabled:
-        primary = OpenMeteoWeatherRepository(
+        primary = MetNoWeatherRepository(
+            base_url=settings.metno_base_url,
+            timeout_seconds=settings.request_timeout_sec,
+        )
+    fallback_primary = None
+    if settings.weather_enabled:
+        fallback_primary = OpenMeteoWeatherRepository(
             base_url=settings.openmeteo_base_url,
             timeout_seconds=settings.request_timeout_sec,
         )
     fallback = FallbackWeatherRepository()
-    return CompositeWeatherRepository(primary=primary, fallback=fallback)
+    secondary = CompositeWeatherRepository(primary=fallback_primary, fallback=fallback)
+    return CompositeWeatherRepository(primary=primary, fallback=secondary)
 
 
 @lru_cache
@@ -89,12 +100,19 @@ def get_elevation_repository() -> CompositeElevationRepository:
     settings = get_settings()
     primary = None
     if settings.elevation_enabled:
-        primary = OpenMeteoElevationRepository(
+        primary = OpenTopoDataElevationRepository(
+            base_url=settings.opentopodata_base_url,
+            timeout_seconds=settings.request_timeout_sec,
+        )
+    fallback_primary = None
+    if settings.elevation_enabled:
+        fallback_primary = OpenMeteoElevationRepository(
             base_url=settings.openmeteo_base_url,
             timeout_seconds=settings.request_timeout_sec,
         )
     fallback = FallbackElevationRepository()
-    return CompositeElevationRepository(primary=primary, fallback=fallback)
+    secondary = CompositeElevationRepository(primary=fallback_primary, fallback=fallback)
+    return CompositeElevationRepository(primary=primary, fallback=secondary)
 
 
 @lru_cache
@@ -145,12 +163,18 @@ def get_fuel_cost_service(
     return FuelCostService(price_service=price_service)
 
 
+@lru_cache
+def get_terrain_profile_service() -> TerrainProfileService:
+    return TerrainProfileService(elevation_repository=get_elevation_repository())
+
+
 def get_context_service(
     routing_repository: CompositeRoutingRepository = Depends(get_routing_repository),
     weather_repository: CompositeWeatherRepository = Depends(get_weather_repository),
     elevation_repository: CompositeElevationRepository = Depends(get_elevation_repository),
     traffic_repository: CompositeTrafficRepository = Depends(get_traffic_repository),
     toll_repository: CompositeTollRepository = Depends(get_toll_repository),
+    terrain_profile_service: TerrainProfileService = Depends(get_terrain_profile_service),
 ) -> ContextService:
     return ContextService(
         routing_repository=routing_repository,
@@ -158,6 +182,7 @@ def get_context_service(
         elevation_repository=elevation_repository,
         traffic_repository=traffic_repository,
         toll_repository=toll_repository,
+        terrain_profile_service=terrain_profile_service,
     )
 
 
@@ -170,6 +195,11 @@ def get_criteria_service(
 @lru_cache
 def get_dynamic_weights_service() -> DynamicWeightsService:
     return DynamicWeightsService()
+
+
+@lru_cache
+def get_route_analysis_service() -> RouteAnalysisService:
+    return RouteAnalysisService()
 
 
 def get_optimizer(
@@ -185,6 +215,8 @@ def get_route_service(
     fuel_cost_service: FuelCostService = Depends(get_fuel_cost_service),
     context_service: ContextService = Depends(get_context_service),
     dynamic_weights_service: DynamicWeightsService = Depends(get_dynamic_weights_service),
+    route_analysis_service: RouteAnalysisService = Depends(get_route_analysis_service),
+    terrain_profile_service: TerrainProfileService = Depends(get_terrain_profile_service),
     run_repository: SqliteRouteRunRepository = Depends(get_run_repository),
     settings: Settings = Depends(get_settings),
 ) -> RouteService:
@@ -195,6 +227,8 @@ def get_route_service(
         fuel_cost_service=fuel_cost_service,
         context_service=context_service,
         dynamic_weights_service=dynamic_weights_service,
+        route_analysis_service=route_analysis_service,
+        terrain_profile_service=terrain_profile_service,
         run_repository=run_repository,
         default_population=settings.ga_default_population,
         default_generations=settings.ga_default_generations,

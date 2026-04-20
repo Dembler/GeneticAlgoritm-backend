@@ -197,11 +197,87 @@ class RouteSegmentFactor(BaseModel):
     toll_cost: float
 
 
+class TerrainTrend(str, Enum):
+    uphill = "uphill"
+    downhill = "downhill"
+    flat = "flat"
+
+
+class RouteTerrainSegment(BaseModel):
+    trend: TerrainTrend
+    geometry: list[list[float]] = Field(default_factory=list)
+    distance_km: float
+    elevation_delta_m: float
+    elevation_gain_m: float
+    elevation_loss_m: float
+    grade_pct: float
+
+
+class RouteTerrainProfile(BaseModel):
+    sampled_points: int = 0
+    total_gain_m: float = 0.0
+    total_loss_m: float = 0.0
+    max_uphill_grade_pct: float = 0.0
+    max_downhill_grade_pct: float = 0.0
+    source: str = "unknown"
+    segments: list[RouteTerrainSegment] = Field(default_factory=list)
+
+
+class RouteSegmentInsight(BaseModel):
+    start_index: int
+    end_index: int
+    start_label: str
+    end_label: str
+    dominant_factor_key: str
+    dominant_factor_label: str
+    severity_score: float
+    severity_level: str
+    color_hex: str
+    narrative: str
+    distance_km: float
+    duration_min: float
+    congestion_index: float
+    weather_severity: float
+    reliability_risk: float
+    safety_risk: float
+    toll_cost: float
+    elevation_gain_m: float
+
+
+class StressTestHighlight(BaseModel):
+    factor_key: str
+    factor_label: str
+    expected_delay_min: float
+    expected_cost_increase: float
+    note: str
+
+
+class RouteStressTest(BaseModel):
+    simulations: int
+    on_time_probability: float
+    within_budget_probability: float
+    within_safety_probability: float
+    failure_probability: float
+    resilience_index: float
+    expected_duration_min: float
+    duration_p10_min: float
+    duration_p90_min: float
+    expected_fuel_cost: float
+    fuel_cost_p10: float
+    fuel_cost_p90: float
+    expected_safety_risk: float
+    worst_case_delay_min: float
+    highlights: list[StressTestHighlight] = Field(default_factory=list)
+
+
 class RouteAlternative(BaseModel):
     ordered_points: list[Point]
     metrics: RouteMetrics
     rank: int
     crowding_distance: float | None = None
+    geometry: list[list[float]] = Field(default_factory=list)
+    provider: str | None = None
+    terrain_profile: RouteTerrainProfile | None = None
 
 
 class OptimizationDiagnostics(BaseModel):
@@ -249,7 +325,9 @@ class RouteComparisonDelta(BaseModel):
 
 class RouteComparisonInfo(BaseModel):
     baseline_ordered_points: list[Point]
+    baseline_geometry: list[list[float]] = Field(default_factory=list)
     baseline_metrics: RouteMetrics
+    baseline_terrain_profile: RouteTerrainProfile | None = None
     optimized_metrics: RouteMetrics
     delta: RouteComparisonDelta
     improvement_pct: RouteComparisonDelta
@@ -279,6 +357,9 @@ class RouteResponse(BaseModel):
     metrics: RouteMetrics | None = None
     alternatives: list[RouteAlternative] = Field(default_factory=list)
     segment_factors: list[RouteSegmentFactor] = Field(default_factory=list)
+    segment_insights: list[RouteSegmentInsight] = Field(default_factory=list)
+    terrain_profile: RouteTerrainProfile | None = None
+    stress_test: RouteStressTest | None = None
     diagnostics: OptimizationDiagnostics | None = None
     dynamic_weights: DynamicWeightsInfo | None = None
     comparison: RouteComparisonInfo | None = None

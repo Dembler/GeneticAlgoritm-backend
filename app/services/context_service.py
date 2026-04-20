@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import logging
 
 from app.domain.models import DataSourceInfo, Point, RouteRequest
 from app.repositories.elevation_repository import ElevationProfile, ElevationRepository
 from app.repositories.routing_repository import RoutingRepository
 from app.repositories.toll_repository import TollRepository
 from app.repositories.traffic_repository import TrafficRepository
-from app.repositories.weather_repository import WeatherRepository, WeatherSnapshot
+from app.repositories.weather_repository import WeatherProfile, WeatherRepository, WeatherSnapshot
+from app.services.terrain_profile_service import TerrainProfileService
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -24,6 +28,10 @@ class OptimizationContext:
     departure_at: datetime
     data_sources: DataSourceInfo
     matrix_provider: str
+    weather_profiles: list[WeatherProfile] = field(default_factory=list)
+    elevation_gain_matrix_m: list[list[float]] = field(default_factory=list)
+    elevation_loss_matrix_m: list[list[float]] = field(default_factory=list)
+    mean_elevation_matrix_m: list[list[float]] = field(default_factory=list)
 
     def mean_congestion(self) -> float:
         values: list[float] = []
@@ -42,12 +50,14 @@ class ContextService:
         elevation_repository: ElevationRepository,
         traffic_repository: TrafficRepository,
         toll_repository: TollRepository,
+        terrain_profile_service: TerrainProfileService,
     ) -> None:
         self._routing_repository = routing_repository
         self._weather_repository = weather_repository
         self._elevation_repository = elevation_repository
         self._traffic_repository = traffic_repository
         self._toll_repository = toll_repository
+        self._terrain_profile_service = terrain_profile_service
 
     async def build(self, request: RouteRequest) -> OptimizationContext:
         departure_at = request.departure_at or datetime.now(timezone.utc)
@@ -62,7 +72,11 @@ class ContextService:
                 traffic_matrix=[],
                 toll_matrix=[],
                 weather=empty_weather,
+                weather_profiles=[],
                 elevation=empty_elevation,
+                elevation_gain_matrix_m=[],
+                elevation_loss_matrix_m=[],
+                mean_elevation_matrix_m=[],
                 departure_at=departure_at,
                 data_sources=DataSourceInfo(
                     routing="unknown",
@@ -76,20 +90,51 @@ class ContextService:
                 matrix_provider="unknown",
             )
 
-        lat = sum([p.lat for p in points]) / len(points)
-        lon = sum([p.lon for p in points]) / len(points)
-
         matrix_task = self._routing_repository.matrix(points, request.profile)
-        weather_task = self._weather_repository.fetch(lat, lon, departure_at)
+        weather_profiles_task = asyncio.gather(
+            *(self._weather_repository.fetch_profile(point.lat, point.lon, departure_at) for point in points)
+        )
         elevation_task = self._elevation_repository.fetch(points)
+        terrain_task = self._terrain_profile_service.build_edge_matrices(points)
         traffic_task = self._traffic_repository.fetch(points, departure_at)
         toll_task = self._toll_repository.fetch(points, request.profile, request.vehicle_class, departure_at)
 
-        matrix_result, weather, elevation, traffic, tolls = await asyncio.gather(
-            matrix_task, weather_task, elevation_task, traffic_task, toll_task
+        matrix_result, weather_profiles, elevation, terrain_matrices, traffic, tolls = await asyncio.gather(
+            matrix_task, weather_profiles_task, elevation_task, terrain_task, traffic_task, toll_task
         )
+        weather = self._aggregate_weather_profiles(weather_profiles, departure_at)
+        elevation_gain_matrix, elevation_loss_matrix, mean_elevation_matrix = terrain_matrices
         traffic_matrix = self._coerce_size(traffic.congestion_matrix, len(points))
         toll_matrix = self._coerce_non_negative_size(tolls.toll_matrix, len(points))
+        logger.warning(
+            "Context debug summary: points=%d departure_at=%s matrix_provider=%s weather_source=%s weather_profile_sources=%s elevation_source=%s traffic_source=%s toll_source=%s weather_profiles=%d weather_severity=%.3f temp=%s precip=%s wind=%s elevation_count=%d elevation_sample=%s distance_shape=%s duration_shape=%s traffic_shape=%s toll_shape=%s distance_row0=%s duration_row0=%s traffic_row0=%s toll_row0=%s gain_row0=%s loss_row0=%s mean_elev_row0=%s",
+            len(points),
+            departure_at.isoformat(),
+            matrix_result.provider,
+            weather.source,
+            [profile.source for profile in weather_profiles],
+            elevation.source,
+            traffic.source,
+            tolls.source,
+            len(weather_profiles),
+            weather.severity,
+            weather.temperature_c,
+            weather.precipitation_mm,
+            weather.wind_speed_kph,
+            len(elevation.elevations_m),
+            elevation.elevations_m[: min(6, len(elevation.elevations_m))],
+            self._shape(matrix_result.distance_km),
+            self._shape(matrix_result.duration_min),
+            self._shape(traffic_matrix),
+            self._shape(toll_matrix),
+            self._sample_row(matrix_result.distance_km),
+            self._sample_row(matrix_result.duration_min),
+            self._sample_row(traffic_matrix),
+            self._sample_row(toll_matrix),
+            self._sample_row(elevation_gain_matrix),
+            self._sample_row(elevation_loss_matrix),
+            self._sample_row(mean_elevation_matrix),
+        )
 
         return OptimizationContext(
             points=points,
@@ -98,7 +143,11 @@ class ContextService:
             traffic_matrix=traffic_matrix,
             toll_matrix=toll_matrix,
             weather=weather,
+            weather_profiles=weather_profiles,
             elevation=elevation,
+            elevation_gain_matrix_m=elevation_gain_matrix,
+            elevation_loss_matrix_m=elevation_loss_matrix,
+            mean_elevation_matrix_m=mean_elevation_matrix,
             departure_at=departure_at,
             data_sources=DataSourceInfo(
                 routing="osrm+fallback",
@@ -111,6 +160,49 @@ class ContextService:
             ),
             matrix_provider=matrix_result.provider,
         )
+
+    @staticmethod
+    def _aggregate_weather_profiles(profiles: list[WeatherProfile], at: datetime) -> WeatherSnapshot:
+        if not profiles:
+            return WeatherSnapshot(
+                severity=0.0,
+                temperature_c=None,
+                precipitation_mm=None,
+                wind_speed_kph=None,
+                source="unknown",
+                source_url=None,
+                observed_at=at,
+            )
+
+        snapshots = [profile.snapshot_at(at) for profile in profiles]
+        severity = sum(item.severity for item in snapshots) / len(snapshots)
+        temperatures = [item.temperature_c for item in snapshots if item.temperature_c is not None]
+        precipitations = [item.precipitation_mm for item in snapshots if item.precipitation_mm is not None]
+        winds = [item.wind_speed_kph for item in snapshots if item.wind_speed_kph is not None]
+        sources = sorted({item.source for item in snapshots if item.source})
+        source_urls = sorted({item.source_url for item in snapshots if item.source_url})
+        return WeatherSnapshot(
+            severity=severity,
+            temperature_c=(sum(temperatures) / len(temperatures)) if temperatures else None,
+            precipitation_mm=(sum(precipitations) / len(precipitations)) if precipitations else None,
+            wind_speed_kph=(sum(winds) / len(winds)) if winds else None,
+            source=("+".join(sources) if sources else "unknown"),
+            source_url=source_urls[0] if len(source_urls) == 1 else None,
+            observed_at=at,
+        )
+
+    @staticmethod
+    def _shape(matrix: list[list[float]]) -> tuple[int, int]:
+        if not matrix:
+            return 0, 0
+        return len(matrix), len(matrix[0]) if matrix[0] else 0
+
+    @staticmethod
+    def _sample_row(matrix: list[list[float]], row_index: int = 0, limit: int = 4) -> list[float]:
+        if not matrix or row_index >= len(matrix):
+            return []
+        row = matrix[row_index] or []
+        return [round(float(value), 4) for value in row[:limit]]
 
     @staticmethod
     def _coerce_size(matrix: list[list[float]], size: int) -> list[list[float]]:

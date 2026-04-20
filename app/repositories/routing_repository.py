@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Protocol
 
 import httpx
 
 from app.domain.models import Point, TransportProfile
 from app.services.distance import haversine_km, path_distance_km
+
+logger = logging.getLogger(__name__)
 
 
 class RoutingProviderError(RuntimeError):
@@ -68,6 +71,15 @@ class OsrmRoutingRepository(RoutingRepository):
         latlon = [[coord[1], coord[0]] for coord in geometry]
         distance_km = float(route.get("distance", 0.0)) / 1000
         duration_min = float(route.get("duration", 0.0)) / 60 if "duration" in route else None
+        logger.warning(
+            "OSRM route raw: profile=%s points=%d geometry_points=%d distance_km=%.3f duration_min=%s sample_geometry=%s",
+            profile.value,
+            len(points),
+            len(latlon),
+            distance_km,
+            None if duration_min is None else round(duration_min, 3),
+            latlon[: min(5, len(latlon))],
+        )
 
         return RouteProviderResult(
             geometry=latlon,
@@ -97,6 +109,15 @@ class OsrmRoutingRepository(RoutingRepository):
 
         distance_km = [[float(value or 0.0) / 1000 for value in row] for row in distance_m]
         duration_min = [[float(value or 0.0) / 60 for value in row] for row in duration_s]
+        logger.warning(
+            "OSRM table raw: profile=%s points=%d shape=%sx%s distance_row0=%s duration_row0=%s",
+            profile.value,
+            len(points),
+            len(distance_km),
+            len(distance_km[0]) if distance_km else 0,
+            [round(float(value), 3) for value in (distance_km[0][: min(4, len(distance_km[0]))] if distance_km else [])],
+            [round(float(value), 3) for value in (duration_min[0][: min(4, len(duration_min[0]))] if duration_min else [])],
+        )
         return MatrixProviderResult(distance_km=distance_km, duration_min=duration_min, provider="osrm-table")
 
 
@@ -104,6 +125,14 @@ class FallbackRoutingRepository(RoutingRepository):
     async def route(self, points: list[Point], profile: TransportProfile) -> RouteProviderResult:
         geometry = [[point.lat, point.lon] for point in points]
         duration_min = self._fallback_duration_minutes(path_distance_km(points), profile)
+        logger.warning(
+            "Fallback route used: profile=%s points=%d distance_km=%.3f duration_min=%.3f geometry=%s",
+            profile.value,
+            len(points),
+            path_distance_km(points),
+            duration_min,
+            geometry,
+        )
         return RouteProviderResult(
             geometry=geometry,
             distance_km=path_distance_km(points),
@@ -122,6 +151,15 @@ class FallbackRoutingRepository(RoutingRepository):
                 d = haversine_km(points[i], points[j])
                 distance[i][j] = d
                 duration[i][j] = self._fallback_duration_minutes(d, profile)
+        logger.warning(
+            "Fallback matrix used: profile=%s points=%d shape=%sx%s distance_row0=%s duration_row0=%s",
+            profile.value,
+            size,
+            len(distance),
+            len(distance[0]) if distance else 0,
+            [round(float(value), 3) for value in (distance[0][: min(4, len(distance[0]))] if distance else [])],
+            [round(float(value), 3) for value in (duration[0][: min(4, len(duration[0]))] if duration else [])],
+        )
         return MatrixProviderResult(distance_km=distance, duration_min=duration, provider="fallback-matrix")
 
     @staticmethod

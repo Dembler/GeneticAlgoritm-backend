@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     fuel_price_fallback_diesel: float = 68.0
     weather_enabled: bool = True
     openmeteo_base_url: str = "https://api.open-meteo.com"
+    metno_base_url: str = "https://api.met.no"
     elevation_enabled: bool = True
+    opentopodata_base_url: str = "https://api.opentopodata.org"
     toll_enabled: bool = False
     toll_base_url: str = "https://apis.tollguru.com/toll"
     toll_api_key: str | None = None

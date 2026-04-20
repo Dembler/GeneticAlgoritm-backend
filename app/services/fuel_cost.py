@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 import time
 
 from app.domain.models import FuelCostBreakdown, FuelType, RouteRequest, VehicleClass
 from app.repositories.fuel_price_repository import FuelPriceInfo, FuelPriceRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,12 +46,28 @@ class FuelPriceService:
     async def get_prices(self) -> FuelPriceSnapshot:
         now = time.time()
         if self._cache is not None and now < self._cache_expires_at:
+            logger.warning(
+                "Fuel price snapshot cache hit: source=%s petrol=%.3f diesel=%.3f currency=%s price_date=%s retrieved_at=%s",
+                self._cache.source,
+                self._cache.petrol_rub_per_liter,
+                self._cache.diesel_rub_per_liter,
+                self._cache.currency,
+                self._cache.price_date,
+                self._cache.retrieved_at.isoformat(),
+            )
             return self._cache
 
         if self._repository is None:
             snapshot = self._fallback_snapshot("source is not configured")
             self._cache = snapshot
             self._cache_expires_at = now + self._cache_ttl_sec
+            logger.warning(
+                "Fuel price snapshot fallback: source=%s petrol=%.3f diesel=%.3f currency=%s",
+                snapshot.source,
+                snapshot.petrol_rub_per_liter,
+                snapshot.diesel_rub_per_liter,
+                snapshot.currency,
+            )
             return snapshot
 
         try:
@@ -56,11 +75,27 @@ class FuelPriceService:
             snapshot = self._from_info(fetched)
             self._cache = snapshot
             self._cache_expires_at = now + self._cache_ttl_sec
+            logger.warning(
+                "Fuel price snapshot fetched: source=%s petrol=%.3f diesel=%.3f currency=%s price_date=%s retrieved_at=%s",
+                snapshot.source,
+                snapshot.petrol_rub_per_liter,
+                snapshot.diesel_rub_per_liter,
+                snapshot.currency,
+                snapshot.price_date,
+                snapshot.retrieved_at.isoformat(),
+            )
             return snapshot
         except Exception:
             snapshot = self._fallback_snapshot("source is unavailable")
             self._cache = snapshot
             self._cache_expires_at = now + self._cache_ttl_sec
+            logger.warning(
+                "Fuel price snapshot fallback after error: source=%s petrol=%.3f diesel=%.3f currency=%s",
+                snapshot.source,
+                snapshot.petrol_rub_per_liter,
+                snapshot.diesel_rub_per_liter,
+                snapshot.currency,
+            )
             return snapshot
 
     def _from_info(self, info: FuelPriceInfo) -> FuelPriceSnapshot:
@@ -302,6 +337,26 @@ class FuelCostService:
         liters_total *= congestion_multiplier
         price_per_liter = self.price_per_liter(prices, request.fuel_type)
         total_cost = liters_total * price_per_liter
+        logger.warning(
+            "Fuel cost debug: fuel_type=%s vehicle_class=%s distance_km=%.3f base_consumption=%.3f uphill_pct=%.3f downhill_pct=%.3f mean_elevation_m=%s temperature_c=%s congestion_index=%.3f terrain_multiplier=%.4f mountain_multiplier=%.4f temperature_multiplier=%.4f congestion_multiplier=%.4f liters_total=%.3f price_per_liter=%.3f total_cost=%.3f source=%s",
+            request.fuel_type.value,
+            request.vehicle_class.value,
+            distance_km,
+            base_consumption,
+            uphill_pct,
+            downhill_pct,
+            None if mean_elevation_m is None else round(mean_elevation_m, 3),
+            None if temperature_c is None else round(temperature_c, 3),
+            congestion_index,
+            terrain_multiplier,
+            mountain_multiplier,
+            temperature_multiplier,
+            congestion_multiplier,
+            liters_total,
+            price_per_liter,
+            total_cost,
+            prices.source,
+        )
 
         return FuelCostBreakdown(
             fuel_type=request.fuel_type,

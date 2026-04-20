@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from app.domain.models import CriteriaWeights, RouteMetrics, RouteRequest, RouteSegmentFactor
+from app.repositories.weather_repository import WeatherProfile, WeatherSnapshot
 from app.services.context_service import OptimizationContext
 from app.services.fuel_cost import FuelCostService, FuelPriceSnapshot
 
@@ -16,6 +17,8 @@ class CandidateEvaluation:
     segment_factors: list[RouteSegmentFactor]
     uphill_pct: float
     downhill_pct: float
+    mean_elevation_m: float | None
+    mean_temperature_c: float | None = None
 
 
 class CriteriaService:
@@ -36,15 +39,25 @@ class CriteriaService:
         traffic = context.traffic_matrix
         tolls = context.toll_matrix
         elevations = context.elevation.elevations_m
+        elevation_gain_matrix = context.elevation_gain_matrix_m
+        elevation_loss_matrix = context.elevation_loss_matrix_m
+        mean_elevation_matrix = context.mean_elevation_matrix_m
+        weather_profiles = context.weather_profiles
 
         total_distance = 0.0
         total_duration = 0.0
         total_congestion = 0.0
+        total_weather_weight = 0.0
+        total_weighted_weather = 0.0
+        total_weighted_temperature = 0.0
+        total_temperature_weight = 0.0
         total_reliability_risk = 0.0
         total_safety_risk = 0.0
         total_toll = 0.0
         total_gain = 0.0
         total_loss = 0.0
+        weighted_mean_elevation_sum = 0.0
+        weighted_mean_elevation_distance = 0.0
         segments: list[RouteSegmentFactor] = []
 
         for edge_idx in range(len(order_indices) - 1):
@@ -53,14 +66,29 @@ class CriteriaService:
             distance = self._safe_matrix_value(distances, i, j)
             base_duration = self._safe_matrix_value(durations, i, j)
             congestion = self._safe_matrix_value(traffic, i, j)
+            provisional_duration = base_duration if base_duration > 0 else (distance / 38.0 * 60.0 if distance > 0 else 0.0)
+            edge_midpoint_time = context.departure_at + timedelta(minutes=total_duration + (provisional_duration / 2.0))
+            edge_weather = self._edge_weather_snapshot(weather_profiles, i, j, edge_midpoint_time, context.weather)
+            weather = edge_weather.severity
             weather_delay_factor = weather * 0.35
             duration = base_duration * (1.0 + congestion + weather_delay_factor)
             if duration <= 0 and distance > 0:
                 duration = distance / 38.0 * 60.0
 
-            gain, loss = self._elevation_delta(elevations, i, j)
+            gain = self._safe_matrix_value(elevation_gain_matrix, i, j)
+            loss = self._safe_matrix_value(elevation_loss_matrix, i, j)
+            segment_mean_elevation = self._safe_matrix_value(mean_elevation_matrix, i, j)
             total_gain += gain
             total_loss += loss
+            if distance > 0 and segment_mean_elevation > 0:
+                weighted_mean_elevation_sum += segment_mean_elevation * distance
+                weighted_mean_elevation_distance += distance
+            if distance > 0:
+                total_weather_weight += distance
+                total_weighted_weather += weather * distance
+                if edge_weather.temperature_c is not None:
+                    total_weighted_temperature += edge_weather.temperature_c * distance
+                    total_temperature_weight += distance
 
             incident_proxy = max(0.0, min(1.0, 0.1 + 0.25 * congestion + 0.2 * weather))
             reliability_risk = max(0.0, min(1.0, 0.45 * congestion + 0.35 * weather + 0.2 * incident_proxy))
@@ -94,12 +122,24 @@ class CriteriaService:
 
         edge_count = max(1, len(order_indices) - 1)
         congestion_index = total_congestion / edge_count
+        weather_risk_avg = (
+            total_weighted_weather / total_weather_weight if total_weather_weight > 0 else context.weather.severity
+        )
+        mean_temperature_c = (
+            total_weighted_temperature / total_temperature_weight
+            if total_temperature_weight > 0
+            else context.weather.temperature_c
+        )
         reliability_risk_avg = total_reliability_risk / edge_count
         safety_risk_avg = total_safety_risk / edge_count
         reliability_score = max(0.0, min(1.0, 1.0 - reliability_risk_avg))
 
         uphill_pct, downhill_pct = self._terrain_share_from_elevation(total_distance, total_gain, total_loss)
-        mean_elevation_m = self._mean_elevation(elevations)
+        mean_elevation_m = (
+            weighted_mean_elevation_sum / weighted_mean_elevation_distance
+            if weighted_mean_elevation_distance > 0
+            else self._mean_elevation(elevations)
+        )
 
         terrain_multiplier = self._fuel_cost_service.terrain_multiplier(
             request.vehicle_class, uphill_pct, downhill_pct
@@ -110,7 +150,7 @@ class CriteriaService:
             mean_elevation_m,
         )
         temperature_multiplier = self._fuel_cost_service.temperature_multiplier(
-            context.weather.temperature_c,
+            mean_temperature_c,
             total_distance,
         )
         consumption = self._fuel_cost_service.resolve_consumption_l_per_100km(request)
@@ -139,7 +179,7 @@ class CriteriaService:
             fuel_cost=fuel_cost,
             co2_kg=co2_kg,
             congestion_index=congestion_index,
-            weather_risk=weather,
+            weather_risk=weather_risk_avg,
             reliability_score=reliability_score,
             safety_risk=safety_risk_avg,
             toll_cost=total_toll,
@@ -154,6 +194,37 @@ class CriteriaService:
             segment_factors=segments,
             uphill_pct=uphill_pct,
             downhill_pct=downhill_pct,
+            mean_elevation_m=mean_elevation_m,
+            mean_temperature_c=mean_temperature_c,
+        )
+
+    @staticmethod
+    def _edge_weather_snapshot(
+        profiles: list[WeatherProfile],
+        i: int,
+        j: int,
+        at: datetime,
+        fallback: WeatherSnapshot,
+    ) -> WeatherSnapshot:
+        if not profiles:
+            return fallback
+        snapshots: list[WeatherSnapshot] = []
+        for idx in {i, j}:
+            if 0 <= idx < len(profiles):
+                snapshots.append(profiles[idx].snapshot_at(at))
+        if not snapshots:
+            return fallback
+        temperatures = [item.temperature_c for item in snapshots if item.temperature_c is not None]
+        precipitations = [item.precipitation_mm for item in snapshots if item.precipitation_mm is not None]
+        winds = [item.wind_speed_kph for item in snapshots if item.wind_speed_kph is not None]
+        return WeatherSnapshot(
+            severity=sum(item.severity for item in snapshots) / len(snapshots),
+            temperature_c=(sum(temperatures) / len(temperatures)) if temperatures else None,
+            precipitation_mm=(sum(precipitations) / len(precipitations)) if precipitations else None,
+            wind_speed_kph=(sum(winds) / len(winds)) if winds else None,
+            source=snapshots[0].source,
+            source_url=snapshots[0].source_url,
+            observed_at=at,
         )
 
     @staticmethod
@@ -238,15 +309,6 @@ class CriteriaService:
         if i < len(matrix) and j < len(matrix[i]):
             return max(0.0, float(matrix[i][j]))
         return 0.0
-
-    @staticmethod
-    def _elevation_delta(elevations: list[float], i: int, j: int) -> tuple[float, float]:
-        if i >= len(elevations) or j >= len(elevations):
-            return 0.0, 0.0
-        delta = float(elevations[j]) - float(elevations[i])
-        if delta >= 0:
-            return delta, 0.0
-        return 0.0, -delta
 
     @staticmethod
     def _mean_elevation(elevations: list[float]) -> float | None:
