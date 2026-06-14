@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: route-optimization-lab-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements-prod.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: APP_APP_NAME
+        value: Route Optimization Lab
+      - key: APP_CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: APP_TOMTOM_ENABLED
+        value: true
+      - key: APP_TOMTOM_API_KEY
+        sync: false
+      - key: APP_TOMTOM_ROUTING_API_KEY
+        sync: false
+      - key: APP_TOMTOM_SEARCH_API_KEY
+        sync: false
+      - key: APP_TOMTOM_TRAFFIC_API_KEY
+        sync: false
+      - key: APP_TOMTOM_INCIDENTS_API_KEY
+        sync: false
+      - key: APP_OPENROUTESERVICE_ENABLED
+        value: false
+      - key: APP_OSRM_ENABLED
+        value: true
+      - key: APP_OVERPASS_ENABLED
+        value: true
+      - key: APP_SYNTHETIC_DATA_ENABLED
+        value: false
+      - key: APP_TOLL_ENABLED
+        value: false
+      - key: APP_ROUTE_RUNS_DB_PATH
+        value: /tmp/route_runs.db
+      - key: APP_GA_DEFAULT_POPULATION
+        value: 64
+      - key: APP_GA_DEFAULT_GENERATIONS
+        value: 80
+      - key: APP_GA_PARALLEL_WORKERS
+        value: 1

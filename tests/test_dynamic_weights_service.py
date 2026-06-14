@@ -73,7 +73,9 @@ def test_priority_profile_kept_when_dynamic_disabled() -> None:
     assert fastest.triggers == ["dynamic_disabled"]
     assert cheapest.triggers == ["dynamic_disabled"]
     assert fastest.adjusted.duration != cheapest.adjusted.duration
-    assert fastest.adjusted.fuel_cost != cheapest.adjusted.fuel_cost
+    assert fastest.adjusted.operational_cost != cheapest.adjusted.operational_cost
+    assert fastest.adjusted.fuel_cost == 0.0
+    assert cheapest.adjusted.fuel_cost == 0.0
 
 
 def test_dynamic_context_triggers_are_applied_when_enabled() -> None:
@@ -93,3 +95,32 @@ def test_dynamic_context_triggers_are_applied_when_enabled() -> None:
     assert "high_congestion" in enabled.triggers
     assert "high_fuel_price" in enabled.triggers
     assert enabled.adjusted.duration > disabled.adjusted.duration
+
+
+def test_cargo_profile_adjusts_route_priorities() -> None:
+    service = DynamicWeightsService()
+    context = _context(departure_hour=12, weather_severity=0.2, traffic_value=0.1)
+
+    standard = service.compute(
+        RouteRequest(points=context.points, cargo={"profile": "standard"}),
+        context,
+        fuel_price_per_liter=63.0,
+    )
+    fragile = service.compute(
+        RouteRequest(points=context.points, cargo={"profile": "fragile"}),
+        context,
+        fuel_price_per_liter=63.0,
+    )
+    perishable = service.compute(
+        RouteRequest(points=context.points, cargo={"profile": "perishable"}),
+        context,
+        fuel_price_per_liter=63.0,
+    )
+
+    assert fragile.adjusted.cargo_risk == 0.0
+    assert fragile.adjusted.road_quality == 0.0
+    assert fragile.adjusted.operational_cost > standard.adjusted.operational_cost
+    assert "cargo_fragile" in fragile.triggers
+    assert perishable.adjusted.duration > standard.adjusted.duration
+    assert perishable.adjusted.reliability == 0.0
+    assert "cargo_perishable" in perishable.triggers

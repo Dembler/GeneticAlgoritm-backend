@@ -1,0 +1,15 @@
+.git
+.idea
+.pytest_cache
+.venv
+__pycache__
+*.py[cod]
+*.log
+.env
+.env.*
+data
+docs
+experiments
+experiments*.zip
+scripts
+tests

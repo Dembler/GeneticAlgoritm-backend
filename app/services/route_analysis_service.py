@@ -34,7 +34,22 @@ class RouteAnalysisService:
         "tolls": {
             "label": "Платные дороги",
             "color": "#ef5f7a",
-            "note": "Финансовая чувствительность маршрута в основном создаётся платными участками.",
+            "note": "Финансовая чувствительность маршрута в основном создается платными участками.",
+        },
+        "road_quality": {
+            "label": "Качество покрытия",
+            "color": "#64748b",
+            "note": "Состояние покрытия повышает задержки, расход и риск на части маршрута.",
+        },
+        "dynamic_events": {
+            "label": "Дорожные события",
+            "color": "#b45309",
+            "note": "Аварии, ремонтные зоны и временные ограничения могут резко снизить надежность маршрута.",
+        },
+        "cargo": {
+            "label": "Cargo",
+            "color": "#0f766e",
+            "note": "Cargo sensitivity increases the impact of road surface, road events, terrain and reliability on this segment.",
         },
         "safety": {
             "label": "Безопасность",
@@ -42,9 +57,14 @@ class RouteAnalysisService:
             "note": "Участок в первую очередь уязвим по рискам безопасности и требует осторожного режима.",
         },
         "reliability": {
-            "label": "Надёжность",
+            "label": "Надежность",
             "color": "#0891b2",
             "note": "Основной риск связан с непредсказуемостью времени прохождения сегмента.",
+        },
+        "infrastructure": {
+            "label": "Инфраструктурные ограничения",
+            "color": "#7f1d1d",
+            "note": "Сегмент ограничен параметрами инфраструктуры и может быть недопустим для транспорта.",
         },
     }
 
@@ -54,7 +74,7 @@ class RouteAnalysisService:
         segment_factors: list[RouteSegmentFactor],
     ) -> list[RouteSegmentInsight]:
         insights: list[RouteSegmentInsight] = []
-        for index, segment in enumerate(segment_factors):
+        for segment in segment_factors:
             start_idx = min(segment.start_index, len(points) - 1)
             end_idx = min(segment.end_index, len(points) - 1)
             start_label = points[start_idx].label or f"Точка {start_idx + 1}"
@@ -62,6 +82,7 @@ class RouteAnalysisService:
             factor_scores = self._factor_scores(segment)
             dominant_key, dominant_score = max(factor_scores.items(), key=lambda item: item[1])
             meta = self._FACTOR_META[dominant_key]
+            severity_level = self._severity_level(dominant_score)
             insights.append(
                 RouteSegmentInsight(
                     start_index=segment.start_index,
@@ -71,8 +92,15 @@ class RouteAnalysisService:
                     dominant_factor_key=dominant_key,
                     dominant_factor_label=meta["label"],
                     severity_score=dominant_score,
-                    severity_level=self._severity_level(dominant_score),
+                    severity_level=severity_level,
                     color_hex=meta["color"],
+                    map_color_hex=self._map_color(dominant_key, dominant_score),
+                    map_stroke_weight=self._map_stroke_weight(dominant_score),
+                    map_dash_array=self._map_dash_array(dominant_key, severity_level),
+                    is_problematic=dominant_score >= 0.35
+                    or not segment.temporal_accessible
+                    or not segment.infrastructure_accessible
+                    or bool(segment.violated_constraints),
                     narrative=self._build_segment_narrative(
                         start_label=start_label,
                         end_label=end_label,
@@ -87,6 +115,15 @@ class RouteAnalysisService:
                     safety_risk=segment.safety_risk,
                     toll_cost=segment.toll_cost,
                     elevation_gain_m=segment.elevation_gain_m,
+                    road_quality=segment.road_quality,
+                    road_quality_risk=segment.road_quality_risk,
+                    incident_risk=segment.incident_risk,
+                    roadwork_risk=segment.roadwork_risk,
+                    dynamic_event_risk=segment.dynamic_event_risk,
+                    cargo_risk=segment.cargo_risk,
+                    temporal_accessible=segment.temporal_accessible,
+                    infrastructure_penalty=segment.infrastructure_penalty,
+                    violated_constraints=segment.violated_constraints,
                 )
             )
         return insights
@@ -119,13 +156,15 @@ class RouteAnalysisService:
         rng = random.Random(request.random_seed if request.random_seed is not None else 137)
         simulations = 120
         time_limit = request.constraints.max_duration_min or (metrics.duration_min * 1.08)
-        budget_limit = request.constraints.max_fuel_cost or (metrics.fuel_cost * 1.12)
+        budget_base = metrics.operational_cost if metrics.operational_cost > 0 else metrics.fuel_cost
+        budget_limit = request.constraints.max_operational_cost or request.constraints.max_fuel_cost or (budget_base * 1.12)
         safety_limit = request.constraints.max_safety_risk
         if safety_limit is None:
             safety_limit = min(0.95, metrics.safety_risk + 0.08)
 
         total_distance = max(metrics.distance_km, 1e-6)
         base_fuel_cost = max(metrics.fuel_cost - metrics.toll_cost, 0.0)
+        base_nonfuel_operational_cost = max(budget_base - metrics.fuel_cost, 0.0)
         duration_samples: list[float] = []
         fuel_samples: list[float] = []
         safety_samples: list[float] = []
@@ -138,7 +177,7 @@ class RouteAnalysisService:
 
         for _ in range(simulations):
             duration_total = 0.0
-            fuel_total = metrics.toll_cost
+            fuel_total = metrics.toll_cost + base_nonfuel_operational_cost
             weighted_safety = 0.0
 
             for segment in segment_factors:
@@ -151,6 +190,9 @@ class RouteAnalysisService:
                     0.55 * effects["weather"]
                     + 0.95 * effects["congestion"]
                     + 1.15 * effects["elevation"]
+                    + 0.70 * effects["road_quality"]
+                    + 0.85 * effects["dynamic_events"]
+                    + 0.65 * effects["cargo"]
                     + 0.45 * effects["reliability"]
                 )
                 fuel_total += segment_base_fuel * cost_multiplier + (segment.toll_cost * effects["tolls"])
@@ -160,6 +202,9 @@ class RouteAnalysisService:
                     segment.safety_risk
                     + (0.45 * effects["weather"])
                     + (0.25 * effects["congestion"])
+                    + (0.36 * effects["road_quality"])
+                    + (0.42 * effects["dynamic_events"])
+                    + (0.26 * effects["cargo"])
                     + (0.35 * effects["reliability"])
                     + (0.60 * effects["safety"])
                     + rng.uniform(0.0, 0.02),
@@ -208,7 +253,6 @@ class RouteAnalysisService:
         )
 
         highlights = self._build_stress_highlights(
-            metrics=metrics,
             simulations=simulations,
             factor_delay_totals=factor_delay_totals,
             factor_cost_totals=factor_cost_totals,
@@ -234,7 +278,6 @@ class RouteAnalysisService:
 
     def _build_stress_highlights(
         self,
-        metrics: RouteMetrics,
         simulations: int,
         factor_delay_totals: dict[str, float],
         factor_cost_totals: dict[str, float],
@@ -244,19 +287,16 @@ class RouteAnalysisService:
             key=lambda key: (factor_delay_totals[key] + factor_cost_totals[key]),
             reverse=True,
         )[:3]
-        highlights: list[StressTestHighlight] = []
-        for key in ordered:
-            meta = self._FACTOR_META[key]
-            highlights.append(
-                StressTestHighlight(
-                    factor_key=key,
-                    factor_label=meta["label"],
-                    expected_delay_min=factor_delay_totals[key] / simulations,
-                    expected_cost_increase=factor_cost_totals[key] / simulations,
-                    note=meta["note"],
-                )
+        return [
+            StressTestHighlight(
+                factor_key=key,
+                factor_label=self._FACTOR_META[key]["label"],
+                expected_delay_min=factor_delay_totals[key] / simulations,
+                expected_cost_increase=factor_cost_totals[key] / simulations,
+                note=self._FACTOR_META[key]["note"],
             )
-        return highlights
+            for key in ordered
+        ]
 
     def _factor_scores(self, segment: RouteSegmentFactor) -> dict[str, float]:
         distance_m = max(segment.distance_km * 1000.0, 1.0)
@@ -266,8 +306,15 @@ class RouteAnalysisService:
             "congestion": min(1.0, segment.congestion_index),
             "elevation": min(1.0, grade_ratio * 20.0),
             "tolls": min(1.0, segment.toll_cost / 250.0),
+            "road_quality": min(1.0, segment.road_quality_risk),
+            "dynamic_events": min(
+                1.0,
+                max(segment.dynamic_event_risk, 0.0 if segment.temporal_accessible else 1.0),
+            ),
+            "cargo": min(1.0, segment.cargo_risk),
             "safety": min(1.0, segment.safety_risk),
             "reliability": min(1.0, segment.reliability_risk),
+            "infrastructure": min(1.0, segment.infrastructure_penalty / 100_000.0),
         }
 
     def _sample_segment_effects(
@@ -281,8 +328,12 @@ class RouteAnalysisService:
             "congestion": factor_scores["congestion"] * rng.uniform(0.05, 0.30),
             "elevation": factor_scores["elevation"] * rng.uniform(0.03, 0.16),
             "tolls": factor_scores["tolls"] * rng.uniform(0.02, 0.08),
+            "road_quality": factor_scores["road_quality"] * rng.uniform(0.03, 0.13),
+            "dynamic_events": factor_scores["dynamic_events"] * rng.uniform(0.04, 0.18),
+            "cargo": factor_scores["cargo"] * rng.uniform(0.03, 0.16),
             "safety": factor_scores["safety"] * rng.uniform(0.02, 0.12),
             "reliability": factor_scores["reliability"] * rng.uniform(0.03, 0.14),
+            "infrastructure": factor_scores["infrastructure"] * rng.uniform(0.02, 0.10),
         }
 
     def _build_segment_narrative(
@@ -317,9 +368,31 @@ class RouteAnalysisService:
                 f"Участок {start_label} -> {end_label} требует осторожного режима: "
                 f"риск безопасности {segment.safety_risk:.2f}."
             )
+        if factor_key == "road_quality":
+            return (
+                f"Участок {start_label} -> {end_label} чувствителен к качеству покрытия: "
+                f"качество {segment.road_quality:.2f}, риск {segment.road_quality_risk:.2f}."
+            )
+        if factor_key == "dynamic_events":
+            access_note = "временно доступен" if segment.temporal_accessible else "временно закрыт"
+            return (
+                f"Участок {start_label} -> {end_label} чувствителен к дорожным событиям: "
+                f"ДТП {segment.incident_risk:.2f}, ремонт {segment.roadwork_risk:.2f}, {access_note}."
+            )
+        if factor_key == "cargo":
+            return (
+                f"Segment {start_label} -> {end_label} is sensitive for the selected cargo: "
+                f"cargo risk {segment.cargo_risk:.2f}, road quality {segment.road_quality:.2f}."
+            )
+        if factor_key == "infrastructure":
+            constraints = ", ".join(segment.violated_constraints) if segment.violated_constraints else "нет данных"
+            return (
+                f"Участок {start_label} -> {end_label} конфликтует с инфраструктурными ограничениями: "
+                f"{constraints}."
+            )
         return (
             f"Участок {start_label} -> {end_label} подвержен разбросу по времени: "
-            f"риск надёжности {segment.reliability_risk:.2f}."
+            f"риск надежности {segment.reliability_risk:.2f}."
         )
 
     @staticmethod
@@ -329,6 +402,42 @@ class RouteAnalysisService:
         if value >= 0.35:
             return "medium"
         return "low"
+
+    @staticmethod
+    def _map_color(factor_key: str, value: float) -> str:
+        if value >= 0.75:
+            return "#dc2626"
+        if factor_key == "congestion":
+            return "#f97316"
+        if factor_key == "road_quality":
+            return "#eab308"
+        if factor_key == "weather":
+            return "#2563eb"
+        if value >= 0.55:
+            return "#f97316"
+        if factor_key in {"infrastructure", "dynamic_events"}:
+            return "#b45309"
+        return "#0f766e"
+
+    @staticmethod
+    def _map_stroke_weight(value: float) -> int:
+        if value >= 0.75:
+            return 13
+        if value >= 0.55:
+            return 11
+        if value >= 0.35:
+            return 9
+        return 7
+
+    @staticmethod
+    def _map_dash_array(factor_key: str, severity_level: str) -> str | None:
+        if factor_key in {"infrastructure", "dynamic_events"}:
+            return "10 8"
+        if severity_level == "high":
+            return None
+        if severity_level == "medium":
+            return "6 10"
+        return "4 12"
 
     @staticmethod
     def _percentile(values: list[float], percentile: float) -> float:

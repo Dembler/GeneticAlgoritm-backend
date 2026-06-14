@@ -178,6 +178,16 @@ class FuelCostService:
         VehicleClass.light_truck: 0.24,
         VehicleClass.heavy_truck: 0.2,
     }
+    _DEFAULT_CAPACITY_T = {
+        VehicleClass.passenger: 0.45,
+        VehicleClass.light_truck: 2.0,
+        VehicleClass.heavy_truck: 20.0,
+    }
+    _LOAD_SENSITIVITY = {
+        VehicleClass.passenger: 0.10,
+        VehicleClass.light_truck: 0.16,
+        VehicleClass.heavy_truck: 0.22,
+    }
     _SEA_LEVEL_PRESSURE_KPA = 101.325
 
     def __init__(self, price_service: FuelPriceService) -> None:
@@ -204,6 +214,23 @@ class FuelCostService:
 
     def compute_liters(self, distance_km: float, consumption_l_per_100km: float, terrain_multiplier: float) -> float:
         return distance_km * consumption_l_per_100km / 100.0 * terrain_multiplier
+
+    def vehicle_capacity_t(self, request: RouteRequest) -> float:
+        return request.vehicle_capacity_t or self._DEFAULT_CAPACITY_T[request.vehicle_class]
+
+    def load_ratio(self, request: RouteRequest) -> float:
+        cargo_weight_t = request.cargo.weight_t
+        if cargo_weight_t is None or cargo_weight_t <= 0:
+            return 0.0
+        capacity_t = self.vehicle_capacity_t(request)
+        if capacity_t <= 0:
+            return 0.0
+        return self._clamp(cargo_weight_t / capacity_t, 0.0, 1.5)
+
+    def load_multiplier(self, request: RouteRequest) -> float:
+        load_ratio = self.load_ratio(request)
+        sensitivity = self._LOAD_SENSITIVITY[request.vehicle_class]
+        return self._clamp(1.0 + (sensitivity * load_ratio), 1.0, 1.35)
 
     def estimate_co2_kg(self, liters: float, fuel_type: FuelType) -> float:
         return liters * self._CO2_KG_PER_LITER[fuel_type]
@@ -318,6 +345,8 @@ class FuelCostService:
         temperature_c: float | None = None,
         congestion_index: float = 0.0,
         mean_elevation_m: float | None = None,
+        road_quality_risk: float = 0.0,
+        dynamic_event_risk: float = 0.0,
     ) -> FuelCostBreakdown:
         prices = await self._price_service.get_prices()
         base_consumption = self.resolve_consumption_l_per_100km(request)
@@ -331,27 +360,43 @@ class FuelCostService:
         )
         temperature_multiplier = self.temperature_multiplier(temperature_c, distance_km)
         congestion_multiplier = 1.0 + (0.2 * self._clamp(congestion_index, 0.0, 1.0))
+        surface_multiplier = 1.0 + (0.12 * self._clamp(road_quality_risk, 0.0, 1.0))
+        dynamic_events_multiplier = 1.0 + (0.08 * self._clamp(dynamic_event_risk, 0.0, 1.0))
+        load_multiplier = self.load_multiplier(request)
+        load_ratio = self.load_ratio(request)
+        vehicle_capacity_t = self.vehicle_capacity_t(request)
         liters_total = self.compute_liters(distance_km, base_consumption, terrain_multiplier)
         liters_total *= mountain_multiplier
         liters_total *= temperature_multiplier
         liters_total *= congestion_multiplier
+        liters_total *= surface_multiplier
+        liters_total *= dynamic_events_multiplier
+        liters_total *= load_multiplier
         price_per_liter = self.price_per_liter(prices, request.fuel_type)
         total_cost = liters_total * price_per_liter
         logger.warning(
-            "Fuel cost debug: fuel_type=%s vehicle_class=%s distance_km=%.3f base_consumption=%.3f uphill_pct=%.3f downhill_pct=%.3f mean_elevation_m=%s temperature_c=%s congestion_index=%.3f terrain_multiplier=%.4f mountain_multiplier=%.4f temperature_multiplier=%.4f congestion_multiplier=%.4f liters_total=%.3f price_per_liter=%.3f total_cost=%.3f source=%s",
+            "Fuel cost debug: fuel_type=%s vehicle_class=%s distance_km=%.3f base_consumption=%.3f cargo_weight_t=%s vehicle_capacity_t=%s load_ratio=%.4f uphill_pct=%.3f downhill_pct=%.3f mean_elevation_m=%s temperature_c=%s congestion_index=%.3f road_quality_risk=%.3f dynamic_event_risk=%.3f terrain_multiplier=%.4f mountain_multiplier=%.4f temperature_multiplier=%.4f congestion_multiplier=%.4f surface_multiplier=%.4f dynamic_events_multiplier=%.4f load_multiplier=%.4f liters_total=%.3f price_per_liter=%.3f total_cost=%.3f source=%s",
             request.fuel_type.value,
             request.vehicle_class.value,
             distance_km,
             base_consumption,
+            None if request.cargo.weight_t is None else round(request.cargo.weight_t, 3),
+            round(vehicle_capacity_t, 3),
+            load_ratio,
             uphill_pct,
             downhill_pct,
             None if mean_elevation_m is None else round(mean_elevation_m, 3),
             None if temperature_c is None else round(temperature_c, 3),
             congestion_index,
+            road_quality_risk,
+            dynamic_event_risk,
             terrain_multiplier,
             mountain_multiplier,
             temperature_multiplier,
             congestion_multiplier,
+            surface_multiplier,
+            dynamic_events_multiplier,
+            load_multiplier,
             liters_total,
             price_per_liter,
             total_cost,
@@ -369,6 +414,12 @@ class FuelCostService:
             mountain_multiplier=mountain_multiplier,
             temperature_multiplier=temperature_multiplier,
             congestion_multiplier=congestion_multiplier,
+            surface_multiplier=surface_multiplier,
+            dynamic_events_multiplier=dynamic_events_multiplier,
+            load_multiplier=load_multiplier,
+            load_ratio=load_ratio,
+            cargo_weight_t=request.cargo.weight_t,
+            vehicle_capacity_t=vehicle_capacity_t,
             liters_total=liters_total,
             price_per_liter=price_per_liter,
             total_cost=total_cost,

@@ -23,12 +23,20 @@ Thumbs.db
 # Environment and local config
 .env
 .env.*
+!.env.example
 
 # Runtime data and generated frontend bundle
 data/*.db
 app/frontend_dist/
 
+# Local experiment outputs
+experiments/
+experiments*.zip
+
 # Reports, dissertation materials and local research files in project root
 /*.pdf
+/*.osm.pbf
 /*.txt
 !/requirements.txt
+!/requirements-prod.txt
+!/runtime.txt

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -15,6 +16,16 @@ frontend_dist_dir = base_dir / "frontend_dist"
 frontend_assets_dir = frontend_dist_dir / "assets"
 
 app = FastAPI(title=settings.app_name)
+
+cors_allowed_origins = settings.parsed_cors_allowed_origins
+if cors_allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_allowed_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 app.include_router(router)
 

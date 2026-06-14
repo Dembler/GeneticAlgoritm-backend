@@ -19,3 +19,6 @@ class RouteController:
 
     def export_run_csv(self, run_id: str) -> str | None:
         return self._route_service.export_run_csv(run_id)
+
+    def export_run_pdf(self, run_id: str) -> bytes | None:
+        return self._route_service.export_run_pdf(run_id)

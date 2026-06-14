@@ -181,10 +181,15 @@ class OpenMeteoWeatherRepository(WeatherRepository):
 
 
 class MetNoWeatherRepository(WeatherRepository):
-    def __init__(self, base_url: str = "https://api.met.no", timeout_seconds: float = 10.0) -> None:
+    def __init__(
+        self,
+        base_url: str = "https://api.met.no",
+        timeout_seconds: float = 10.0,
+        user_agent: str = "RouteOptimizationLab/1.0 (contact: local)",
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
-        self._headers = {"User-Agent": "RouteOptimizationLab/1.0 (local-demo)"}
+        self._headers = {"User-Agent": user_agent}
 
     async def fetch(self, lat: float, lon: float, at: datetime | None = None) -> WeatherSnapshot:
         profile = await self.fetch_profile(lat, lon, at)

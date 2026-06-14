@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from datetime import datetime, timezone
 
 import pytest
@@ -10,7 +11,7 @@ from app.repositories.weather_repository import WeatherSnapshot
 from app.services.context_service import OptimizationContext
 from app.services.criteria_service import CriteriaService
 from app.services.fuel_cost import FuelCostService, FuelPriceService, FuelPriceSnapshot
-from app.services.route_optimizer import RouteOptimizer
+from app.services.route_optimizer import CandidateState, RouteOptimizer
 
 
 def _optimizer() -> RouteOptimizer:
@@ -162,3 +163,157 @@ def test_weighted_and_pareto_use_different_generation_selection(monkeypatch: pyt
     assert weighted_calls["pareto"] == 0
     assert pareto_calls["pareto"] > 0
     assert pareto_calls["weighted"] == 0
+
+
+def test_pmx_crossover_preserves_permutation() -> None:
+    rng = random.Random(11)
+    parent_a = (1, 2, 3, 4, 5, 6)
+    parent_b = (4, 1, 6, 2, 5, 3)
+
+    child_a, child_b = RouteOptimizer._pmx_crossover(parent_a, parent_b, rng)
+
+    assert sorted(child_a) == sorted(parent_a)
+    assert sorted(child_b) == sorted(parent_a)
+    assert len(set(child_a)) == len(parent_a)
+    assert len(set(child_b)) == len(parent_a)
+
+
+def test_insertion_mutation_preserves_permutation_and_moves_gene() -> None:
+    class FakeRandom:
+        def sample(self, _population, _count):
+            return [0, 2]
+
+    genome = (1, 2, 3, 4)
+
+    mutated = RouteOptimizer._insertion_mutation(genome, FakeRandom())
+
+    assert mutated == (2, 3, 1, 4)
+    assert sorted(mutated) == sorted(genome)
+
+
+def test_repair_genome_avoids_forbidden_edges_when_possible() -> None:
+    genome = (1, 2)
+
+    repaired = RouteOptimizer._repair_genome(
+        genome,
+        fix_ends=True,
+        points_count=4,
+        forbidden_edges={(1, 2)},
+    )
+
+    assert sorted(repaired) == sorted(genome)
+    assert RouteOptimizer._bad_edge_count(
+        RouteOptimizer._decode(repaired, fix_ends=True, points_count=4),
+        {(1, 2)},
+    ) == 0
+
+
+def test_initial_population_uses_warm_start_orders() -> None:
+    optimizer = _optimizer()
+    context = _context(points_count=5)
+
+    population = optimizer._initial_population(
+        middle_indices=[1, 2, 3],
+        population_size=24,
+        rng=random.Random(3),
+        context=context,
+        fix_ends=True,
+        points_count=5,
+        warm_start_orders=[[0, 3, 1, 2, 4]],
+    )
+
+    assert (3, 1, 2) in population
+
+
+def test_initial_population_repairs_warm_start_forbidden_edges() -> None:
+    optimizer = _optimizer()
+    context = _context(points_count=4)
+
+    population = optimizer._initial_population(
+        middle_indices=[1, 2],
+        population_size=24,
+        rng=random.Random(3),
+        context=context,
+        fix_ends=True,
+        points_count=4,
+        warm_start_orders=[[0, 1, 2, 3]],
+        forbidden_edges={(1, 2)},
+    )
+
+    assert (2, 1) in population
+    assert (1, 2) not in population
+
+
+def test_optimizer_reports_warm_start_seed_count() -> None:
+    optimizer = _optimizer()
+    context = _context(points_count=5)
+    request = RouteRequest(
+        points=context.points,
+        optimize=True,
+        fix_ends=True,
+        random_seed=7,
+        population_size=24,
+        generations=20,
+        warm_start_orders=[[0, 3, 1, 2, 4]],
+    )
+
+    result = optimizer.optimize(
+        request=request,
+        context=context,
+        weights=request.criteria_weights,
+        fuel_prices=_prices(),
+    )
+
+    assert result.diagnostics.warm_start_solutions == 1
+    assert result.diagnostics.population_memory_solutions > 0
+    assert result.population_memory_orders
+
+
+def test_baseline_guard_selects_baseline_when_original_best_is_worse() -> None:
+    optimizer = _optimizer()
+    context = _context(points_count=4)
+    request = RouteRequest(points=context.points, optimize=True, fix_ends=True)
+    bad_order = [0, 2, 1, 3]
+    bad_evaluation = optimizer._criteria_service.evaluate(bad_order, request, context, _prices())
+    bad_state = CandidateState(genome=(2, 1), evaluation=bad_evaluation)
+
+    selection = optimizer._select_final_candidate(
+        request=request,
+        context=context,
+        weights=request.criteria_weights,
+        fuel_prices=_prices(),
+        candidate_states=[bad_state],
+        original_best_state=bad_state,
+        middle_indices=[1, 2],
+        fix_ends=True,
+        points_count=4,
+    )
+
+    assert selection.state.evaluation.order_indices == [0, 1, 2, 3]
+    assert selection.baseline_guard_applied is True
+    assert selection.final_selected_from == "baseline"
+    assert selection.final_selection_reason == "optimizer_best_regressed_key_metrics"
+    assert selection.state.evaluation.metrics.objective_score <= selection.baseline_score
+
+
+def test_preserve_elites_keeps_baseline_seed_in_population() -> None:
+    optimizer = _optimizer()
+    context = _context(points_count=4)
+    request = RouteRequest(points=context.points, optimize=True, fix_ends=True)
+    prices = _prices()
+
+    def evaluate_genome(genome: tuple[int, ...]):
+        order = RouteOptimizer._decode(genome, fix_ends=True, points_count=4)
+        return optimizer._criteria_service.evaluate(order, request, context, prices)
+
+    selected = [CandidateState(genome=(2, 1), evaluation=evaluate_genome((2, 1)))]
+    preserved = optimizer._preserve_elites(
+        selected=selected,
+        elite_genomes={(1, 2)},
+        evaluate_genome=evaluate_genome,
+        weights=request.criteria_weights,
+        population_size=2,
+        use_pareto=False,
+    )
+
+    assert (1, 2) in {state.genome for state in preserved}
